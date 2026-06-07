@@ -6,7 +6,7 @@ import com.travel_ease.hotel_system.dto.request.UserRequestDto;
 import com.travel_ease.hotel_system.dto.request.UserUpdateRequestDto;
 import com.travel_ease.hotel_system.dto.response.LoginResponseDto;
 import com.travel_ease.hotel_system.dto.response.UserResponseDto;
-
+import java.util.Map;
 
 public interface UserService {
     public void createUser(UserRequestDto dto);
@@ -18,4 +18,5 @@ public interface UserService {
     public boolean verifyEmail(String otp, String email);
     public void updateUserDetails(String email, UserUpdateRequestDto data);
     public UserResponseDto getUserDetails(String email);
+    public Map<String, String> generateNewAccessToken(String refreshToken);
 }
