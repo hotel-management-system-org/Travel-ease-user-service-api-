@@ -13,7 +13,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
-import java.io.IOException;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/user-service/api/v1/users")
@@ -25,8 +25,7 @@ public class UserController {
     @PostMapping("/visitors/signup")
     public ResponseEntity<StandardResponseDto> createUser(
                 @RequestBody UserRequestDto dto
-    ) throws IOException {
-        System.out.println("createUser");
+    ){
         systemUserService.createUser(dto);
         return new ResponseEntity<>(
                 new StandardResponseDto(201,"user account was created",null),
@@ -38,7 +37,7 @@ public class UserController {
     public ResponseEntity<StandardResponseDto> resend(
             @RequestParam String email,
             @RequestParam String type
-    ) throws IOException{
+    ){
         systemUserService.resend(email, type);
         return new ResponseEntity<>(
                 new StandardResponseDto(200,"please check you email",null),
@@ -49,7 +48,7 @@ public class UserController {
     @PostMapping("/visitors/forgot-password-request-code")
     public ResponseEntity<StandardResponseDto> forgotPasswordRequest(
             @RequestParam String email
-    ) throws IOException{
+    ){
         systemUserService.forgotPasswordSendVerificationCode(email);
         return new ResponseEntity<>(
                 new StandardResponseDto(200,"please check you email",null),
@@ -61,8 +60,7 @@ public class UserController {
     public ResponseEntity<StandardResponseDto> verifyReset(
             @RequestParam String email,
             @RequestParam String otp
-    ) throws IOException{
-
+    ){
         boolean isVerified = systemUserService.verifyReset(otp,email);
         return new ResponseEntity<>(
                 new StandardResponseDto(isVerified?200:400,isVerified?"Verified":"try Again",isVerified),
@@ -73,8 +71,7 @@ public class UserController {
     @PostMapping("/visitors/reset-password")
     public ResponseEntity<StandardResponseDto> resetPassword(
             @RequestBody PasswordRequestDto dto
-    ) throws IOException{
-
+    ){
         boolean isChanged = systemUserService.passwordReset(dto);
         return new ResponseEntity<>(
                 new StandardResponseDto(isChanged?201:400,isChanged?"CHANGED":"try Again",isChanged),
@@ -86,8 +83,7 @@ public class UserController {
     public ResponseEntity<StandardResponseDto> verifyEmail(
             @RequestParam String email,
             @RequestParam String otp
-    ) throws IOException{
-
+    ){
         boolean isVerified = systemUserService.verifyEmail(otp,email);
         return new ResponseEntity<>(
                 new StandardResponseDto(isVerified?200:400,isVerified?"Verified":"try Again",isVerified),
@@ -98,13 +94,29 @@ public class UserController {
     @PostMapping("/visitors/login")
     public ResponseEntity<StandardResponseDto> login(
             @RequestBody LoginRequestDto dto
-    ) throws IOException{
-
+    ){
         return new ResponseEntity<>(
                 new StandardResponseDto(200,"success",systemUserService.login(dto)),
                 HttpStatus.OK
         );
     }
+
+    @PostMapping("/visitors/refresh-token")
+    public ResponseEntity<StandardResponseDto> refreshToken(@RequestBody Map<String, String> request) {
+        String refreshToken = request.get("refreshToken");
+        if (refreshToken == null || refreshToken.isEmpty()) {
+            return new ResponseEntity<>(
+                    new StandardResponseDto(400, "Refresh Token is required", null),
+                    HttpStatus.BAD_REQUEST
+            );
+        }
+        Map<String, String> tokens = systemUserService.generateNewAccessToken(refreshToken);
+        return new ResponseEntity<>(
+                new StandardResponseDto(200, "Token refreshed successfully", tokens),
+                HttpStatus.OK
+        );
+    }
+
 
     @GetMapping("/get-user-details")
     @PreAuthorize("hasAnyRole('CUSTOMER','SUPER_ADMIN')")
