@@ -29,6 +29,7 @@ public class ObjectMapper {
         user.setEmailVerified(isEmailVerified);
         List<CredentialRepresentation> credList = new ArrayList<>();
         CredentialRepresentation cred = new CredentialRepresentation();
+        cred.setType(CredentialRepresentation.PASSWORD);
         cred.setTemporary(false);
         cred.setValue(dto.getPassword());
         credList.add(cred);
