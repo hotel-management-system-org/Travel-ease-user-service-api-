@@ -49,12 +49,16 @@ public class UserServiceImpl implements UserService {
 
     @Value("${keycloak.realm}")
     private String realm;
+
     @Value("${keycloak.client-id}")
     private String clientId;
+
     @Value("${keycloak.client-secret}")
     private String clientSecret;
+
     @Value("${spring.security.oauth2.resourceserver.jwt.token-uri}")
     private String keycloakApiUrl;
+
     @Value("${spring.security.oauth2.resourceserver.jwt.token-uri}")
     private String keycloakApiTokenUri;
 
@@ -73,109 +77,101 @@ public class UserServiceImpl implements UserService {
     public void createUser(UserRequestDto dto) {
         log.info("Registering user with email: {}", dto.getEmail());
 
+
         if (dto.getFirstName() == null || dto.getFirstName().trim().isEmpty()) {
             throw new BadRequestException("First name is required");
         }
-
         if (dto.getLastName() == null || dto.getLastName().trim().isEmpty()) {
             throw new BadRequestException("Last name is required");
         }
-
         if (dto.getEmail() == null || dto.getEmail().trim().isEmpty()) {
             throw new BadRequestException("Email is required");
         }
 
-        String userId;
-        Keycloak keycloak;
-        UserRepresentation existingUser;
+        Keycloak masterAdminClient = keycloakConfig.getKeycloakInstance();
+        UsersResource usersResource = masterAdminClient.realm(realm).users();
 
-        keycloak = keycloakConfig.getKeycloakInstance();
+        List<UserRepresentation> existingUsers = usersResource.search(dto.getEmail());
 
-        existingUser = keycloak.realm(realm).users().search(dto.getEmail()).stream()
-                .findFirst().orElse(null);
-
-        if (existingUser != null) {
+        if (existingUsers != null && !existingUsers.isEmpty()) {
             Optional<User> selectedUserFromUserService = userRepository.findByEmail(dto.getEmail());
 
             if (selectedUserFromUserService.isEmpty()) {
-                keycloak.realm(realm).users().delete(dto.getEmail());
+                log.warn("User existed in Keycloak but missing in DB. Purging Keycloak user: {}", dto.getEmail());
+                usersResource.delete(existingUsers.get(0).getId());
             } else {
                 throw new DuplicateEntryException("Email already exists");
             }
         } else {
             Optional<User> selectedUserFromUserService = userRepository.findByEmail(dto.getEmail());
-
             if (selectedUserFromUserService.isPresent()) {
                 Optional<Otp> selectedOtp = otpRepository.findByUserId(selectedUserFromUserService.get().getId());
-
-                selectedOtp
-                        .ifPresent(otp -> otpRepository.deleteById(otp.getId()));
-
+                selectedOtp.ifPresent(otp -> otpRepository.deleteById(otp.getId()));
                 userRepository.deleteById(selectedUserFromUserService.get().getId());
-
             }
         }
 
         UserRepresentation userRepresentation = objectMapper.mapUserRepo(dto, false, false);
-        UsersResource usersResource = keycloak.realm(realm).users();
         Response response = usersResource.create(userRepresentation);
 
         if (response.getStatus() != HttpStatus.CREATED.value()) {
             if (response.getStatus() == HttpStatus.CONFLICT.value()) {
                 throw new DuplicateEntryException("User already exists in Keycloak");
             }
-            throw new InternalServerError("Failed to create user in Identity Provider");
+            throw new InternalServerError("Failed to create user in Identity Provider. Status: " + response.getStatus());
         }
 
-            RoleRepresentation userRole = keycloak.realm(realm).roles().get("CUSTOMER").toRepresentation();
-            userId = response.getLocation().getPath().replaceAll(".*/([^/]+)$", "$1");
-            log.info("User created in Keycloak with ID: {}", userId);
-            keycloak.realm(realm).users().get(userId).roles().realmLevel().add(Arrays.asList(userRole));
-            UserRepresentation createUser = keycloak.realm(realm).users().get(userId).toRepresentation();
+        String keycloakUserId = response.getLocation().getPath().replaceAll(".*/([^/]+)$", "$1");
+        log.info("User created successfully in Keycloak with ID: {}", keycloakUserId);
 
+        try {
+            RoleRepresentation userRole = masterAdminClient.realm(realm).roles().get("CUSTOMER").toRepresentation();
+            usersResource.get(keycloakUserId).roles().realmLevel().add(Collections.singletonList(userRole));
+
+            UserRepresentation createdKeycloakUser = usersResource.get(keycloakUserId).toRepresentation();
+
+            User user = User.builder()
+                    .id(UUID.randomUUID())
+                    .keycloakId(createdKeycloakUser.getId())
+                    .email(dto.getEmail())
+                    .firstName(dto.getFirstName())
+                    .lastName(dto.getLastName())
+                    .contact(dto.getContact())
+                    .status(UserStatus.PENDING)
+                    .role(UserRole.CUSTOMER)
+                    .isActive(false)
+                    .isAccountNonExpired(true)
+                    .isAccountNonLocked(true)
+                    .isCredentialsNonExpired(true)
+                    .isEnabled(false)
+                    .isEmailVerified(false)
+                    .build();
+
+            User savedUser = userRepository.save(user);
+            Otp createOtp = Otp.builder()
+                    .id(UUID.randomUUID())
+                    .code(otpGenerator.generateOtp(5))
+                    .attempts(0)
+                    .isVerified(false)
+                    .user(savedUser)
+                    .build();
+            otpRepository.save(createOtp);
+            
             try {
-
-
-                User user = User.builder()
-                        .id(UUID.randomUUID())
-                        .keycloakId(createUser.getId())
-                        .email(dto.getEmail())
-                        .firstName(dto.getFirstName())
-                        .lastName(dto.getLastName())
-                        .contact(dto.getContact())
-                        .status(UserStatus.PENDING)
-                        .role(UserRole.CUSTOMER)
-                        .isActive(false)
-                        .isAccountNonExpired(true)
-                        .isAccountNonLocked(true)
-                        .isCredentialsNonExpired(true)
-                        .isEnabled(false)
-                        .isEmailVerified(false)
-                        .build();
-
-                User savedUser = userRepository.save(user);
-
-                Otp createOtp = Otp.builder()
-                        .id(UUID.randomUUID())
-                        .code(otpGenerator.generateOtp(5))
-                        .attempts(0)
-                        .isVerified(false)
-                        .user(savedUser)
-                        .build();
-                otpRepository.save(createOtp);
-
-                //send email user email service
-
-                try {
-                    eventPublisher.publishUserSendOtp(objectMapper.toCreateEvent(savedUser, Integer.parseInt(createOtp.getCode())));
-                } catch (Exception e) {
-                    log.error("Failed to publish user created event", e);
-                }
-            }catch (Exception e){
-                log.error("Database save failed. Rolling back Keycloak user: {}", userId, e);
-                usersResource.get(userId).remove();
-                throw new InternalServerError("Failed to create user in Identity Provider");
+                eventPublisher.publishUserSendOtp(objectMapper.toCreateEvent(savedUser, Integer.parseInt(createOtp.getCode())));
+            } catch (Exception e) {
+                log.error("Failed to publish user created event to Kafka", e);
             }
+
+        } catch (Exception e) {
+            log.error("Database or role assignment transaction failed. Rolling back Keycloak user: {}", keycloakUserId, e);
+            try {
+                usersResource.get(keycloakUserId).remove();
+            } catch (Exception rollbackEx) {
+                log.error("Critical failure: Failed to rollback/delete Keycloak user during cascade error", rollbackEx);
+            }
+            throw new InternalServerError("Failed to finalize user registration workflow");
+        }
     }
 
     @Override
@@ -216,10 +212,9 @@ public class UserServiceImpl implements UserService {
 
             if (roles.contains("SUPER_ADMIN")) {
                 log.info("SUPER_ADMIN login detected for Keycloak user: {}", keycloakUserId);
-
                 User user = provisionSuperAdminIfNotExists(keycloakUserId, decodeToken);
                 loginResponse.setUser(objectMapper.mapToUserResponse(user));
-            }else{
+            } else {
                 User user = validateRegularUserLogin(dto.getEmail());
                 loginResponse.setUser(objectMapper.mapToUserResponse(user));
             }
@@ -227,16 +222,13 @@ public class UserServiceImpl implements UserService {
             log.info("Login successful for: {}", dto.getEmail());
             return loginResponse;
 
-
         } catch (HttpClientErrorException ex) {
             log.error("Login failed: {}", ex.getMessage(), ex);
-            if (ex.getStatusCode() == HttpStatus.UNAUTHORIZED){
+            if (ex.getStatusCode() == HttpStatus.UNAUTHORIZED) {
                 throw new UnAuthorizedException("Invalid email or password");
             }
-            throw new KeycloakException("Authentication service unavailable" + ex.getMessage(), ex);
+            throw new KeycloakException("Authentication service unavailable: " + ex.getMessage(), ex);
         }
-
-
     }
 
     private User validateRegularUserLogin(String email) {
@@ -246,7 +238,6 @@ public class UserServiceImpl implements UserService {
         if (!user.isEmailVerified()) {
             throw new UnAuthorizedException("Please verify your email before logging in");
         }
-
 
         if (user.getStatus() == UserStatus.BLOCKED || user.getStatus() == UserStatus.SUSPENDED) {
             throw new UnAuthorizedException("Your account has been " + user.getStatus());
@@ -259,36 +250,27 @@ public class UserServiceImpl implements UserService {
         return user;
     }
 
-
     @Override
     public void resend(String email, String type) {
         try {
             Optional<User> selectedUser = userRepository.findByEmail(email);
             if (selectedUser.isEmpty()) {
-                throw new EntryNotFoundException("unable to find any users associated with the provided email address");
+                throw new EntryNotFoundException("Unable to find any users associated with the provided email address");
             }
 
             User systemUser = selectedUser.get();
 
-            if (type.equalsIgnoreCase("SIGNUP")) {
-                if (systemUser.isEmailVerified()) {
-                    throw new DuplicateEntryException("The email is already activated");
-                }
+            if (type.equalsIgnoreCase("SIGNUP") && systemUser.isEmailVerified()) {
+                throw new DuplicateEntryException("The email is already activated");
             }
 
             Otp selectedOtpObj = systemUser.getOtp();
             String code = otpGenerator.generateOtp(5);
 
-/*
-            send email user email service
-            emailService.sendUserSignupVerificationCode(systemUser.getEmail(), "verify your email", code, systemUser.getFirstName());
-*/
-
             selectedOtpObj.setAttempts(0);
             selectedOtpObj.setCode(code);
             selectedOtpObj.setIsVerified(false);
             otpRepository.save(selectedOtpObj);
-
 
         } catch (Exception e) {
             throw new RuntimeException(e.getMessage());
@@ -300,32 +282,24 @@ public class UserServiceImpl implements UserService {
         try {
             Optional<User> selectedUser = userRepository.findByEmail(email);
             if (selectedUser.isEmpty()) {
-                throw new EntryNotFoundException("unable to find any users associated with the provided email address");
+                throw new EntryNotFoundException("Unable to find any users associated with the provided email address");
             }
 
             User systemUser = selectedUser.get();
+            Keycloak keycloak = keycloakConfig.getKeycloakInstance();
 
-            Keycloak keycloak = null;
-            keycloak = keycloakConfig.getKeycloakInstance();
-            UserRepresentation existingUser =
-                    keycloak.realm(realm).users().search(email).stream().findFirst().orElse(null);
-
-            if (existingUser == null) {
-                throw new EntryNotFoundException("unable to find any users associated with the provided email address");
-            }
-
+            UserRepresentation existingUser = keycloak.realm(realm).users().search(email)
+                    .stream().findFirst()
+                    .orElseThrow(() -> new EntryNotFoundException("Unable to find any users associated with the provided email address"));
 
             Otp selectedOtpObj = systemUser.getOtp();
             String code = otpGenerator.generateOtp(5);
-
 
             selectedOtpObj.setAttempts(0);
             selectedOtpObj.setCode(code);
             selectedOtpObj.setIsVerified(false);
             otpRepository.save(selectedOtpObj);
 
-            //send email use email service
-            /* emailService.sendUserSignupVerificationCode(systemUser.getEmail(), "verify your email to reset the password", code, systemUser.getFirstName());*/
         } catch (Exception e) {
             throw new RuntimeException(e.getMessage());
         }
@@ -334,49 +308,48 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional
     public boolean verifyReset(String otp, String email) {
-            Optional<User> selectedUser = userRepository.findByEmail(email);
-            if (selectedUser.isEmpty()) {
-                throw new EntryNotFoundException("unable to find any users associated with the provided email address");
-            }
+        Optional<User> selectedUser = userRepository.findByEmail(email);
+        if (selectedUser.isEmpty()) {
+            throw new EntryNotFoundException("Unable to find any users associated with the provided email address");
+        }
 
-            User systemUserOb = selectedUser.get();
-            Otp otpOb = systemUserOb.getOtp();
+        User systemUserOb = selectedUser.get();
+        Otp otpOb = systemUserOb.getOtp();
 
         if (otpOb.getAttempts() >= 5) {
             throw new BadRequestException("Maximum attempts reached. Please request a new verification code.");
         }
 
-       if (otpOb.getCode().equals(otp)) {
-           otpOb.setAttempts(0);
-           otpOb.setIsVerified(true);
-           otpRepository.save(otpOb);
-           return true;
-        }
-         else {
-           int newAttempts = otpOb.getAttempts() + 1;
-           otpOb.setAttempts(newAttempts);
-           otpRepository.save(otpOb);
+        if (otpOb.getCode().equals(otp)) {
+            otpOb.setAttempts(0);
+            otpOb.setIsVerified(true);
+            otpRepository.save(otpOb);
+            return true;
+        } else {
+            int newAttempts = otpOb.getAttempts() + 1;
+            otpOb.setAttempts(newAttempts);
+            otpRepository.save(otpOb);
 
-           if(newAttempts >= 5){
-               throw new BadRequestException("Account locked due to too many invalid OTP attempts. Please resend a new code.");
-           }
-           return false;
-         }
+            if (newAttempts >= 5) {
+                throw new BadRequestException("Account locked due to too many invalid OTP attempts. Please resend a new code.");
+            }
+            return false;
+        }
     }
 
     @Override
     public boolean passwordReset(PasswordRequestDto dto) {
-
         Optional<User> selectedUserObj = userRepository.findByEmail(dto.getEmail());
         if (selectedUserObj.isPresent()) {
-
             User systemUser = selectedUserObj.get();
             Otp otpObj = systemUser.getOtp();
             Keycloak keycloak = keycloakConfig.getKeycloakInstance();
+
             List<UserRepresentation> keyCloakUsers = keycloak.realm(realm).users().search(systemUser.getEmail());
             if (!keyCloakUsers.isEmpty() && otpObj.getCode().equals(dto.getCode())) {
                 UserRepresentation keyCloakUser = keyCloakUsers.get(0);
                 UserResource userResource = keycloak.realm(realm).users().get(keyCloakUser.getId());
+
                 CredentialRepresentation newPass = new CredentialRepresentation();
                 newPass.setType(CredentialRepresentation.PASSWORD);
                 newPass.setValue(dto.getPassword());
@@ -384,12 +357,11 @@ public class UserServiceImpl implements UserService {
                 userResource.resetPassword(newPass);
 
                 userRepository.save(systemUser);
-
                 return true;
             }
-            throw new BadRequestException("try again");
+            throw new BadRequestException("Try again");
         }
-        throw new EntryNotFoundException("unable to find!");
+        throw new EntryNotFoundException("Unable to find user!");
     }
 
     @Override
@@ -397,13 +369,13 @@ public class UserServiceImpl implements UserService {
     public boolean verifyEmail(String otp, String email) {
         Optional<User> selectedUserObj = userRepository.findByEmail(email);
         if (selectedUserObj.isEmpty()) {
-            throw new EntryNotFoundException("cant find the associated user");
+            throw new EntryNotFoundException("Can't find the associated user");
         }
         User user = selectedUserObj.get();
         Otp otpObj = user.getOtp();
 
         if (otpObj.getIsVerified()) {
-            throw new BadRequestException("this otp has been used");
+            throw new BadRequestException("This OTP has been used");
         }
 
         if (otpObj.getAttempts() >= 5) {
@@ -412,18 +384,15 @@ public class UserServiceImpl implements UserService {
         }
 
         if (otpObj.getCode().equals(otp)) {
-            UserRepresentation keycloakUser = keycloakConfig.getKeycloakInstance().realm(realm)
-                    .users()
-                    .search(email)
-                    .stream()
-                    .findFirst()
-                    .orElseThrow(() -> new EntryNotFoundException("user not found"));
+            Keycloak keycloak = keycloakConfig.getKeycloakInstance();
+            UserRepresentation keycloakUser = keycloak.realm(realm).users().search(email)
+                    .stream().findFirst()
+                    .orElseThrow(() -> new EntryNotFoundException("User not found in Identity Provider"));
 
             keycloakUser.setEmailVerified(true);
             keycloakUser.setEnabled(true);
 
-            keycloakConfig.getKeycloakInstance().realm(realm)
-                    .users().get(keycloakUser.getId()).update(keycloakUser);
+            keycloak.realm(realm).users().get(keycloakUser.getId()).update(keycloakUser);
 
             user.setEmailVerified(true);
             user.setIsEnabled(true);
@@ -434,13 +403,12 @@ public class UserServiceImpl implements UserService {
 
             otpObj.setIsVerified(true);
             otpObj.setAttempts(otpObj.getAttempts() + 1);
-
-
+            otpRepository.save(otpObj);
 
             return true;
         } else {
             otpObj.setAttempts(otpObj.getAttempts() + 1);
-
+            otpRepository.save(otpObj);
         }
         return false;
     }
@@ -455,45 +423,46 @@ public class UserServiceImpl implements UserService {
         User systemUser = byEmail.get();
         Keycloak keycloak = keycloakConfig.getKeycloakInstance();
         List<UserRepresentation> keyCloakUsers = keycloak.realm(realm).users().search(systemUser.getEmail());
+
         if (!keyCloakUsers.isEmpty()) {
             UserRepresentation keyCloakUser = keyCloakUsers.get(0);
             keyCloakUser.setFirstName(data.getFirstName());
             keyCloakUser.setLastName(data.getLastName());
-            byEmail.get().setFirstName(data.getFirstName());
-            byEmail.get().setLastName(data.getLastName());
-            System.out.println("Keycloak user " + keyCloakUser.getFirstName());
+
+            keycloak.realm(realm).users().get(keyCloakUser.getId()).update(keyCloakUser);
+
+            systemUser.setFirstName(data.getFirstName());
+            systemUser.setLastName(data.getLastName());
             userRepository.save(systemUser);
         }
+    }
 
-}
-
-        @Override
-        public UserResponseDto getUserDetails(String email){
-            Optional<User> byEmail = userRepository.findByEmail(email);
-            if (byEmail.isEmpty()) {
-                throw new EntryNotFoundException("User was not found");
-            }
-
-            UserAvatar userAvatar = byEmail.get().getUserAvatar();
-
-            return UserResponseDto.builder()
-                    .email(byEmail.get().getEmail())
-                    .firstName(byEmail.get().getFirstName())
-                    .lastName(byEmail.get().getLastName())
-                    .avatarUrl(userAvatar != null ? fileDataExtractor.byteArrayToString(userAvatar.getResourceUrl()) : null)
-                    .build();
+    @Override
+    public UserResponseDto getUserDetails(String email) {
+        Optional<User> byEmail = userRepository.findByEmail(email);
+        if (byEmail.isEmpty()) {
+            throw new EntryNotFoundException("User was not found");
         }
+
+        UserAvatar userAvatar = byEmail.get().getUserAvatar();
+
+        return UserResponseDto.builder()
+                .email(byEmail.get().getEmail())
+                .firstName(byEmail.get().getFirstName())
+                .lastName(byEmail.get().getLastName())
+                .avatarUrl(userAvatar != null ? fileDataExtractor.byteArrayToString(userAvatar.getResourceUrl()) : null)
+                .build();
+    }
 
     @Override
     public Map generateNewAccessToken(String refreshToken) {
-
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
 
         MultiValueMap<String, String> formData = new LinkedMultiValueMap<>();
         formData.add("grant_type", "refresh_token");
         formData.add("client_id", clientId);
-        formData.add("client_secret", clientSecret);
+        formData.add("formData.add(\"client_secret\", clientSecret);", clientSecret);
         formData.add("refresh_token", refreshToken);
 
         HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(formData, headers);
@@ -506,49 +475,38 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-
     @Transactional
-        public User provisionSuperAdminIfNotExists(String keycloakUserId, Map<String, Object> tokenData) {
-            log.info("Checking SUPER_ADMIN provisioning for Keycloak user: {}", keycloakUserId);
+    public User provisionSuperAdminIfNotExists(String keycloakUserId, Map<String, Object> tokenData) {
+        log.info("Checking SUPER_ADMIN provisioning for Keycloak user: {}", keycloakUserId);
 
-            return userRepository.findByKeycloakId(keycloakUserId)
-                    .orElseGet(() -> {
-                        log.info("SUPER_ADMIN not found in database. Auto-provisioning...");
+        return userRepository.findByKeycloakId(keycloakUserId)
+                .orElseGet(() -> {
+                    log.info("SUPER_ADMIN not found in database. Auto-provisioning...");
 
-                        String email = (String) tokenData.get("email");
-                        String firstName = (String) tokenData.getOrDefault("given_name", "Super");
-                        String lastName = (String) tokenData.getOrDefault("family_name", "Admin");
+                    String email = (String) tokenData.get("email");
+                    String firstName = (String) tokenData.getOrDefault("given_name", "Super");
+                    String lastName = (String) tokenData.getOrDefault("family_name", "Admin");
 
-                        User superAdmin = User.builder()
-                                .id(UUID.randomUUID())
-                                .keycloakId(keycloakUserId)
-                                .firstName(firstName)
-                                .lastName(lastName)
-                                .email(email)
-                                .contact("")
-                                .role(UserRole.SUPER_ADMIN)
-                                .isEmailVerified(true)
-                                .status(UserStatus.ACTIVE)
-                                .isAccountNonExpired(true)
-                                .isAccountNonLocked(true)
-                                .isCredentialsNonExpired(true)
-                                .isEnabled(true)
-                                .build();
+                    User superAdmin = User.builder()
+                            .id(UUID.randomUUID())
+                            .keycloakId(keycloakUserId)
+                            .firstName(firstName)
+                            .lastName(lastName)
+                            .email(email)
+                            .contact("")
+                            .role(UserRole.SUPER_ADMIN)
+                            .isEmailVerified(true)
+                            .status(UserStatus.ACTIVE)
+                            .isAccountNonExpired(true)
+                            .isAccountNonLocked(true)
+                            .isCredentialsNonExpired(true)
+                            .isEnabled(true)
+                            .isEmailVerified(true)
+                            .build();
 
-                        User savedUser = userRepository.save(superAdmin);
-                        /*createUserProfile(savedUser); use user profile service */
-
-                        // Publish Kafka event
-                      /*  kafkaProducerService.publishUserCreatedEvent(Map.of(
-                                "userId", savedUser.getId().toString(),
-                                "email", savedUser.getEmail(),
-                                "role", "SUPER_ADMIN",
-                                "autoProvisioned", true,
-                                "timestamp", LocalDateTime.now().toString()
-                        ));*/
-
-                        log.info("SUPER_ADMIN auto-provisioned successfully: {}", savedUser.getEmail());
-                        return savedUser;
-                    });
-        }
+                    User savedUser = userRepository.save(superAdmin);
+                    log.info("SUPER_ADMIN auto-provisioned successfully: {}", savedUser.getEmail());
+                    return savedUser;
+                });
+    }
 }
