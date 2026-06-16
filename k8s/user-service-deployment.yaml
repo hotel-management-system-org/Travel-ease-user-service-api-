@@ -17,9 +17,6 @@ spec:
       containers:
       - name: user-service-container
         image: travel_ease_user_service:v1
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Never
         ports:
-        - containerPort: 8081    
-    
-
-          
+        - containerPort: 8081
