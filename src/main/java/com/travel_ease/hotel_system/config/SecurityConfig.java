@@ -10,6 +10,11 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.core.OAuth2TokenValidator;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.web.client.RestTemplate;
 
@@ -17,6 +22,9 @@ import org.springframework.web.client.RestTemplate;
 @EnableWebSecurity
 @EnableMethodSecurity
 public class SecurityConfig {
+
+    @org.springframework.beans.factory.annotation.Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}")
+    private String jwkSetUri;
 
     @Autowired
     JwtAuthConverter authConverter;
@@ -49,5 +57,16 @@ public class SecurityConfig {
     @Bean
     public RestTemplate restTemplate(){
         return new RestTemplate();
+    }
+
+    @Bean
+    public JwtDecoder jwtDecoder() {
+        NimbusJwtDecoder jwtDecoder = NimbusJwtDecoder.withJwkSetUri(jwkSetUri).build();
+
+        OAuth2TokenValidator<Jwt> withTimestamp = JwtValidators.createDefault();
+
+        jwtDecoder.setJwtValidator(withTimestamp);
+
+        return jwtDecoder;
     }
 }
