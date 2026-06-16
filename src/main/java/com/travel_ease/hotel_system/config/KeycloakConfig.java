@@ -23,7 +23,7 @@ public class KeycloakConfig {
     @Value("${keycloak.realm}")
     private String realm;
 
-    @Value("${keycloak.admin-username}")
+    @Value("${keycloak.admin-username}")  
     private String adminUsername;
 
     @Value("${keycloak.admin-password}")
@@ -33,12 +33,11 @@ public class KeycloakConfig {
     public Keycloak getKeycloakInstance() {
         return KeycloakBuilder.builder()
                 .serverUrl(authServerUrl)
-                .realm(realm)
-                .clientId(clientId)
-                .clientSecret(clientSecret)
+                .realm("master")
+                .grantType("password")
+                .clientId("admin-cli")
                 .username(adminUsername)
                 .password(adminPassword)
                 .build();
     }
-
 }
