@@ -16,10 +16,10 @@ spec:
     spec:
       containers:
       - name: user-service-container
-        image: travel_ease_user_service:v1
+        image: travel_ease_user_service:v1.1
         env:
           - name: KEYCLOAK_CLIENT_SECRET
-            value: FqVvzbUiCQzjLQuGzOBD83bSh4Po3v5e
+            value: uamG36ZCsJp48TZwRqMCOiuAoSY1qEcB
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8081
